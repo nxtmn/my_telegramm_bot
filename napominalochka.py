@@ -15,7 +15,7 @@ from telegram.ext import (
     filters
 )
 
-TOKEN = "MY_TOKEN_TELEGRAMM"
+TOKEN = "MY_TOKEN_TELEGRAM"
 
 # ---------------------- Состояния ----------------------
 STATE_START, STATE_TEXT, STATE_CALENDAR, STATE_HOUR, STATE_MINUTE, STATE_REPEAT = range(6)
@@ -32,7 +32,8 @@ def load_data():
         try:
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                return data
+                # Преобразуем ключи обратно в int
+                return {int(k): v for k, v in data.items()}
         except Exception as e:
             print(f"Ошибка загрузки данных: {e}")
     return {}
@@ -112,6 +113,31 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     user_id = job.data["user_id"]
     reminder_text = job.data["text"]
+    reminder_index = job.data.get("reminder_index")
+    repeat = job.data.get("repeat")
+    
+    print(f"🔔 ОТПРАВКА НАПОМИНАНИЯ пользователю {user_id}: {reminder_text}")
+    
+    # Обновляем дату в хранилище для повторяющихся напоминаний
+    if repeat and reminder_index is not None:
+        user_id_str = str(user_id)
+        if user_id_str in user_data_store and reminder_index < len(user_data_store[user_id_str]):
+            # Обновляем дату на следующую
+            reminder_data = user_data_store[user_id_str][reminder_index]
+            current_date = datetime.strptime(reminder_data["date"], "%Y-%m-%d").date()
+            
+            if repeat == "daily":
+                new_date = current_date + timedelta(days=1)
+            elif repeat == "weekly":
+                new_date = current_date + timedelta(weeks=1)
+            elif repeat == "monthly":
+                new_date = current_date + timedelta(days=30)
+            elif repeat == "yearly":
+                new_date = current_date + timedelta(days=365)
+            
+            reminder_data["date"] = new_date.strftime("%Y-%m-%d")
+            save_data()
+            print(f"📅 Обновлена дата напоминания для пользователя {user_id}: {new_date.strftime('%Y-%m-%d')}")
     
     random_image = get_random_image()
     
@@ -121,8 +147,9 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
             photo=random_image,
             caption=f"Эт твоя напоминулька, ты хотель {reminder_text} прекрасного тебе денька💖"
         )
+        print(f"✅ УСПЕШНО отправлено напоминание пользователю {user_id}: {reminder_text}")
     except Exception as e:
-        print(f"Ошибка отправки напоминания: {e}")
+        print(f"❌ Ошибка отправки напоминания: {e}")
 
 # ---------------------- Функция отправки скрытого напоминания ----------------------
 async def send_hidden_reminder(context: ContextTypes.DEFAULT_TYPE):
@@ -130,16 +157,19 @@ async def send_hidden_reminder(context: ContextTypes.DEFAULT_TYPE):
     user_id = job.data["user_id"]
     reminder_text = job.data["text"]
     
+    print(f"🔔 ОТПРАВКА СКРЫТОГО НАПОМИНАНИЯ пользователю {user_id}: {reminder_text}")
+    
     try:
         await context.bot.send_message(
             chat_id=user_id,
             text=f"Ты сделаль? {reminder_text} 😼"
         )
+        print(f"✅ УСПЕШНО отправлено скрытое напоминание пользователю {user_id}: {reminder_text}")
     except Exception as e:
-        print(f"Ошибка отправки скрытого напоминания: {e}")
+        print(f"❌ Ошибка отправки скрытого напоминания: {e}")
 
 # ---------------------- Функция планирования напоминания ----------------------
-async def schedule_reminder(user_id, context: ContextTypes.DEFAULT_TYPE, reminder_data):
+async def schedule_reminder(user_id, context: ContextTypes.DEFAULT_TYPE, reminder_data, reminder_index=None):
     try:
         reminder_text = reminder_data["text"]
         date_str = reminder_data["date"]
@@ -165,102 +195,150 @@ async def schedule_reminder(user_id, context: ContextTypes.DEFAULT_TYPE, reminde
         # Текущее время в UTC
         now_utc = datetime.now(pytz.UTC)
         
-        print(f"Пользователь {user_id} установил: {hour}:{minute} в поясе {user_tz}")
-        print(f"Это соответствует: {reminder_datetime_utc.strftime('%H:%M')} UTC")
-        print(f"Скрытое напоминание: {hidden_reminder_datetime_utc.strftime('%H:%M')} UTC")
+        print(f"⏰ Пользователь {user_id} установил: {hour}:{minute:02d} в поясе {user_tz}")
+        print(f"🌍 Это соответствует: {reminder_datetime_utc.strftime('%d.%m.%Y %H:%M')} UTC")
+        print(f"🔔 Скрытое напоминание: {hidden_reminder_datetime_utc.strftime('%d.%m.%Y %H:%M')} UTC")
         
-        # Если время уже прошло, корректируем
+        # Если время уже прошло, корректируем для повторяющихся
         if reminder_datetime_utc < now_utc:
             if repeat == "no_repeat":
                 # Для неповторяющихся - отправляем через 10 секунд
                 reminder_datetime_utc = now_utc + timedelta(seconds=10)
                 hidden_reminder_datetime_utc = reminder_datetime_utc + timedelta(minutes=10)
+                print(f"⏩ Время прошло, отправляем через 10 секунд")
             else:
-                # Для повторяющихся - добавляем период
-                if repeat == "daily":
-                    reminder_datetime_utc += timedelta(days=1)
-                    hidden_reminder_datetime_utc = reminder_datetime_utc + timedelta(minutes=10)
-                elif repeat == "weekly":
-                    reminder_datetime_utc += timedelta(weeks=1)
-                    hidden_reminder_datetime_utc = reminder_datetime_utc + timedelta(minutes=10)
-                elif repeat == "monthly":
-                    reminder_datetime_utc += timedelta(days=30)
-                    hidden_reminder_datetime_utc = reminder_datetime_utc + timedelta(minutes=10)
-                elif repeat == "yearly":
-                    reminder_datetime_utc += timedelta(days=365)
-                    hidden_reminder_datetime_utc = reminder_datetime_utc + timedelta(minutes=10)
+                # Для повторяющихся - находим следующее подходящее время
+                while reminder_datetime_utc < now_utc:
+                    if repeat == "daily":
+                        reminder_datetime_utc += timedelta(days=1)
+                    elif repeat == "weekly":
+                        reminder_datetime_utc += timedelta(weeks=1)
+                    elif repeat == "monthly":
+                        reminder_datetime_utc += timedelta(days=30)
+                    elif repeat == "yearly":
+                        reminder_datetime_utc += timedelta(days=365)
+                
+                hidden_reminder_datetime_utc = reminder_datetime_utc + timedelta(minutes=10)
+                print(f"🔄 Время прошло, установлено следующее повторение")
         
         # Создаем уникальные имена для задач
-        job_name = f"reminder_{user_id}_{datetime.now().timestamp()}"
-        hidden_job_name = f"hidden_reminder_{user_id}_{datetime.now().timestamp()}"
+        timestamp = datetime.now().timestamp()
+        job_name = f"reminder_{user_id}_{timestamp}"
+        hidden_job_name = f"hidden_reminder_{user_id}_{timestamp}"
         
-        # Планируем основное напоминание в UTC
-        context.job_queue.run_once(
-            send_reminder,
-            when=reminder_datetime_utc,
-            data={
-                "user_id": user_id,
-                "text": reminder_text
-            },
-            name=job_name
-        )
+        # Определяем интервалы повторения
+        repeat_interval = None
+        if repeat == "daily":
+            repeat_interval = timedelta(days=1)
+        elif repeat == "weekly":
+            repeat_interval = timedelta(weeks=1)
+        elif repeat == "monthly":
+            repeat_interval = timedelta(days=30)
+        elif repeat == "yearly":
+            repeat_interval = timedelta(days=365)
         
-        # Планируем скрытое напоминание через 10 минут
-        context.job_queue.run_once(
-            send_hidden_reminder,
-            when=hidden_reminder_datetime_utc,
-            data={
-                "user_id": user_id,
-                "text": reminder_text
-            },
-            name=hidden_job_name
-        )
+        # Планируем основное напоминание
+        if repeat == "no_repeat":
+            context.job_queue.run_once(
+                send_reminder,
+                when=reminder_datetime_utc,
+                data={
+                    "user_id": user_id,
+                    "text": reminder_text,
+                    "reminder_index": reminder_index
+                },
+                name=job_name
+            )
+            print(f"📌 Запланировано ОДНОРАЗОВОЕ напоминание")
+        else:
+            context.job_queue.run_repeating(
+                send_reminder,
+                interval=repeat_interval,
+                first=reminder_datetime_utc,
+                data={
+                    "user_id": user_id,
+                    "text": reminder_text,
+                    "reminder_index": reminder_index,
+                    "repeat": repeat
+                },
+                name=job_name
+            )
+            print(f"📌 Запланировано ПОВТОРЯЮЩЕЕСЯ напоминание: {repeat}")
+        
+        # Планируем скрытое напоминание
+        if repeat == "no_repeat":
+            context.job_queue.run_once(
+                send_hidden_reminder,
+                when=hidden_reminder_datetime_utc,
+                data={
+                    "user_id": user_id,
+                    "text": reminder_text,
+                    "reminder_index": reminder_index
+                },
+                name=hidden_job_name
+            )
+        else:
+            context.job_queue.run_repeating(
+                send_hidden_reminder,
+                interval=repeat_interval,
+                first=hidden_reminder_datetime_utc,
+                data={
+                    "user_id": user_id,
+                    "text": reminder_text,
+                    "reminder_index": reminder_index,
+                    "repeat": repeat
+                },
+                name=hidden_job_name
+            )
         
         # Сохраняем информацию о задачах
         if user_id not in scheduled_jobs:
             scheduled_jobs[user_id] = []
-        scheduled_jobs[user_id].append({
+        
+        job_info = {
             "job_name": job_name,
             "hidden_job_name": hidden_job_name,
             "text": reminder_text,
             "datetime": reminder_datetime_utc,
             "hidden_datetime": hidden_reminder_datetime_utc,
-            "repeat": repeat
-        })
+            "repeat": repeat,
+            "reminder_index": reminder_index
+        }
+        
+        if reminder_index is not None and reminder_index < len(scheduled_jobs[user_id]):
+            scheduled_jobs[user_id][reminder_index] = job_info
+        else:
+            scheduled_jobs[user_id].append(job_info)
         
         user_time = reminder_datetime_utc.astimezone(user_timezone)
         hidden_user_time = hidden_reminder_datetime_utc.astimezone(user_timezone)
-        print(f"Основное напоминание запланировано на {user_time.strftime('%Y-%m-%d %H:%M')} в поясе {user_tz}")
-        print(f"Скрытое напоминание запланировано на {hidden_user_time.strftime('%Y-%m-%d %H:%M')} в поясе {user_tz}")
+        print(f"✅ Основное напоминание запланировано на {user_time.strftime('%d.%m.%Y %H:%M')} в поясе {user_tz}")
+        print(f"✅ Скрытое напоминание запланировано на {hidden_user_time.strftime('%d.%m.%Y %H:%M')} в поясе {user_tz}")
         
         # Сохраняем данные после добавления напоминания
         save_data()
         
     except Exception as e:
-        print(f"Ошибка планирования напоминания: {e}")
+        print(f"❌ Ошибка планирования напоминания: {e}")
 
 # ---------------------- Восстановление напоминаний при запуске ----------------------
-def restore_reminders(application):
-    """Восстанавливает все напоминания при запуске бота"""
-    print("Восстановление напоминаний...")
+# async def restore_reminders_async(application):
+#     """Восстанавливает все напоминания при запуске бота (асинхронная версия)"""
+#     print("🔄 Восстановление напоминаний...")
     
-    for user_id_str, reminders in user_data_store.items():
-        user_id = int(user_id_str)
-        for reminder in reminders:
-            try:
-                # Проверяем, есть ли все необходимые данные для планирования
-                if all(key in reminder for key in ['text', 'date', 'hour', 'minute']):
-                    # Создаем контекст для планирования
-                    async def schedule_reminder_job(context):
-                        await schedule_reminder(user_id, context, reminder)
-                    
-                    # Планируем задачу
-                    application.job_queue.run_once(schedule_reminder_job, when=1)
-                    print(f"Восстановлено напоминание для пользователя {user_id}: {reminder['text']}")
-                else:
-                    print(f"Неполные данные для напоминания пользователя {user_id}")
-            except Exception as e:
-                print(f"Ошибка восстановления напоминания для пользователя {user_id}: {e}")
+#     for user_id_str, reminders in user_data_store.items():
+#         user_id = int(user_id_str)
+#         for idx, reminder in enumerate(reminders):
+#             try:
+#                 # Проверяем, есть ли все необходимые данные для планирования
+#                 if all(key in reminder for key in ['text', 'date', 'hour', 'minute']):
+#                     # Планируем напоминание
+#                     await schedule_reminder(user_id, application, reminder, idx)
+#                     print(f"✅ Восстановлено напоминание для пользователя {user_id}: {reminder['text']}")
+#                 else:
+#                     print(f"⚠️ Неполные данные для напоминания пользователя {user_id}: {reminder}")
+#             except Exception as e:
+#                 print(f"❌ Ошибка восстановления напоминания для пользователя {user_id}: {e}")
 
 # ---------------------- Старт ----------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -294,8 +372,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
 
+    print(f"🔘 Обработка кнопки: {data} от пользователя {user_id}")
+
     # ---------------- Начальные действия ----------------
     if data == "what":
+        # Сохраняем состояние, что пользователь начал создание напоминания
+        context.user_data['creating_reminder'] = True
         keyboard = [[InlineKeyboardButton("Вернуться в менюшку", callback_data="back_to_start")]]
         await query.edit_message_text("Введи, что напомнить:", reply_markup=InlineKeyboardMarkup(keyboard))
         return STATE_TEXT
@@ -306,9 +388,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "Туть пусто 👉👈"
         else:
             text_list = []
-            for r in reminders:
+            for idx, r in enumerate(reminders):
                 reminder_text = r.get('text', "?")
-                if "date" in r and "hour" in r and "minute" in r:
+                if all(key in r for key in ['date', 'hour', 'minute']):
                     # Показываем время в часовом поясе пользователя
                     date_str = r['date']
                     hour = r['hour']
@@ -328,9 +410,26 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             tz_name = value[0]
                             break
                     
-                    text_list.append(f"{reminder_text} — {reminder_datetime.strftime('%d.%m.%Y %H:%M')} ({tz_name.split(' ')[0]})")
+                    # Добавляем информацию о повторении
+                    repeat_text = ""
+                    repeat = r.get('repeat', 'no_repeat')
+                    if repeat != 'no_repeat':
+                        if repeat == 'daily':
+                            repeat_text = " 🔄 (каждый день)"
+                        elif repeat == 'weekly':
+                            repeat_text = " 🔄 (каждую неделю)"
+                        elif repeat == 'monthly':
+                            repeat_text = " 🔄 (каждый месяц)"
+                        elif repeat == 'yearly':
+                            repeat_text = " 🔄 (каждый год)"
+                    
+                    # Проверяем активность напоминания
+                    now_user = datetime.now(user_timezone)
+                    status = "✅" if reminder_datetime > now_user else "⏰"
+                    
+                    text_list.append(f"{status} {reminder_text} — {reminder_datetime.strftime('%d.%m.%Y %H:%M')} ({tz_name.split(' ')[0]}){repeat_text}")
                 else:
-                    text_list.append(f"{reminder_text} — Дата и время не установлены 😿")
+                    text_list.append(f"❌ {reminder_text} — Неполные данные (нет даты/времени)")
             text = "Твои напоминульки:\n" + "\n".join(text_list)
         keyboard = [[InlineKeyboardButton("Вернуться в менюшку", callback_data="back_to_start")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -360,17 +459,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "timezone":
         user_tz = user_timezones.get(user_id)
         
-        # Проверяем, был ли уже установлен часовой пояс
-        if user_tz and not context.user_data.get('timezone_changed'):
-            # Первый раз после установки - показываем сообщение об отпуске
-            context.user_data['timezone_changed'] = True
-            message = "Видать ты отправился в замурчательный отпуск! Давай поменяем твой пояс 🏖️"
-        elif user_tz and context.user_data.get('timezone_changed'):
-            # Второй и последующие разы - просто показываем выбор
+        if user_tz:
             message = "Выбери свой часовой пояс:"
-            context.user_data['timezone_changed'] = False  # Сбрасываем флаг
         else:
-            # Первый выбор
             message = "Выбери свой часовой пояс:"
         
         # Создаем клавиатуру с часовыми поясами
@@ -471,6 +562,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(user_id) not in user_data_store or not user_data_store[str(user_id)]:
             await query.edit_message_text("Сначала введи что напоминаем🐱")
             return STATE_TEXT
+        
+        # Проверяем, есть ли текст напоминания
+        user_reminders = user_data_store[str(user_id)]
+        if not user_reminders or 'text' not in user_reminders[-1]:
+            await query.edit_message_text("Сначала введи что напоминаем🐱")
+            return STATE_TEXT
+            
         await show_calendar(update, context)
         return STATE_CALENDAR
 
@@ -480,8 +578,15 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(user_id) not in user_data_store or not user_data_store[str(user_id)]:
             await query.edit_message_text("Сначала введи что напоминаем🐱")
             return STATE_TEXT
+        
+        # Проверяем, есть ли текст напоминания
+        user_reminders = user_data_store[str(user_id)]
+        if not user_reminders or 'text' not in user_reminders[-1]:
+            await query.edit_message_text("Сначала введи что напоминаем🐱")
+            return STATE_TEXT
+            
         user_data_store[str(user_id)][-1]["date"] = date_str
-        save_data()  # Сохраняем после установки даты
+        save_data()
 
         hours = [f"{i:02}" for i in range(24)]
         keyboard = []
@@ -502,6 +607,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(user_id) not in user_data_store or not user_data_store[str(user_id)]:
             await query.edit_message_text("Сначала введи что напоминаем🐱")
             return STATE_TEXT
+        
+        # Проверяем, есть ли текст и дата напоминания
+        user_reminders = user_data_store[str(user_id)]
+        if not user_reminders or 'text' not in user_reminders[-1] or 'date' not in user_reminders[-1]:
+            await query.edit_message_text("Сначала введи что напоминаем и выбери дату🐱")
+            return STATE_TEXT
+            
         hour_str = data.split("_")[1]
         try:
             hour = int(hour_str)
@@ -509,7 +621,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Эхъ, попробуй снова, ошибочка вышла😿")
             return STATE_HOUR
         user_data_store[str(user_id)][-1]["hour"] = hour
-        save_data()  # Сохраняем после установки часа
+        save_data()
 
         keyboard = []
         row = []
@@ -529,13 +641,20 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(user_id) not in user_data_store or not user_data_store[str(user_id)]:
             await query.edit_message_text("Сначала введи что напоминаем🐱")
             return STATE_TEXT
+        
+        # Проверяем, есть ли текст, дата и час напоминания
+        user_reminders = user_data_store[str(user_id)]
+        if not user_reminders or 'text' not in user_reminders[-1] or 'date' not in user_reminders[-1] or 'hour' not in user_reminders[-1]:
+            await query.edit_message_text("Сначала заверши настройку напоминания🐱")
+            return STATE_TEXT
+            
         try:
             minute = int(data.split("_")[1])
         except ValueError:
             await query.edit_message_text("Эхъ, попробуй снова, ошибочка вышла😿")
             return STATE_MINUTE
         user_data_store[str(user_id)][-1]["minute"] = minute
-        save_data()  # Сохраняем после установки минут
+        save_data()
 
         keyboard = [
             [InlineKeyboardButton("Повторять?", callback_data="repeat"),
@@ -558,6 +677,17 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return STATE_REPEAT
 
     elif data in ["daily", "weekly", "monthly", "yearly", "no_repeat"]:
+        # Проверяем, есть ли все необходимые данные
+        user_reminders = user_data_store.get(str(user_id), [])
+        if not user_reminders:
+            await query.edit_message_text("Ошибка: нет напоминаний для планирования😿")
+            return await start(update, context)
+            
+        current_reminder = user_reminders[-1]
+        if not all(key in current_reminder for key in ['text', 'date', 'hour', 'minute']):
+            await query.edit_message_text("Ошибка: неполные данные напоминания😿")
+            return await start(update, context)
+            
         user_data_store[str(user_id)][-1]["repeat"] = data
         reminder = user_data_store[str(user_id)][-1]
         
@@ -581,13 +711,31 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
         
         await query.message.reply_text("Спасибо! Есть напоминулька!")
+        
+        repeat_text = ""
+        if data != "no_repeat":
+            if data == "daily":
+                repeat_text = " 🔄 (повторяется каждый день)"
+            elif data == "weekly":
+                repeat_text = " 🔄 (повторяется каждую неделю)"
+            elif data == "monthly":
+                repeat_text = " 🔄 (повторяется каждый месяц)"
+            elif data == "yearly":
+                repeat_text = " 🔄 (повторяется каждый год)"
+        
         await query.message.reply_text(
-            f"Текст: {reminder['text']}\n"
-            f"Дата и время: {reminder_datetime.strftime('%d.%m.%Y %H:%M')} ({tz_name})\n"
-            f"Повтор: {data}"
+            f"📝 Текст: {reminder['text']}\n"
+            f"⏰ Дата и время: {reminder_datetime.strftime('%d.%m.%Y %H:%M')}\n"
+            f"🌍 Часовой пояс: {tz_name}{repeat_text}"
         )
         
-        await schedule_reminder(user_id, context, reminder)
+        # Планируем напоминание с указанием индекса
+        reminder_index = len(user_data_store[str(user_id)]) - 1
+        await schedule_reminder(user_id, context, reminder, reminder_index)
+        
+        # Очищаем флаг создания напоминания
+        context.user_data.pop('creating_reminder', None)
+        
         return await start(update, context)
 
     else:
@@ -598,8 +746,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text
+    
+    print(f"📝 Пользователь {user_id} ввел текст: {text}")
+    
     if str(user_id) not in user_data_store:
         user_data_store[str(user_id)] = []
+    
+    # Добавляем новое напоминание
     user_data_store[str(user_id)].append({"text": text})
     
     # Сохраняем данные после добавления текста напоминания
@@ -609,7 +762,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Когда напомнить?", callback_data="when")],
         [InlineKeyboardButton("Вернуться в менюшку", callback_data="back_to_start")]
     ]
-    await update.message.reply_text("Установили напоминульку 😺", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(f"Установили напоминульку: '{text}' 😺\nТеперь выбери когда напомнить:", reply_markup=InlineKeyboardMarkup(keyboard))
     return STATE_START
 
 # ---------------------- Календарь ----------------------
@@ -643,11 +796,29 @@ async def show_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE, mont
 
 # ---------------------- Основная функция ----------------------
 def main():
+    """Основная синхронная функция"""
     # Создаем приложение
     application = ApplicationBuilder().token(TOKEN).build()
+
+    # Восстанавливаем напоминания СИНХРОННО
+    print("🔄 Восстановление напоминаний...")
     
-    # Восстанавливаем напоминания сразу после создания приложения
-    restore_reminders(application)
+    for user_id_str, reminders in user_data_store.items():
+        user_id = int(user_id_str)
+        for idx, reminder in enumerate(reminders):
+            try:
+                # Проверяем, есть ли все необходимые данные для планирования
+                if all(key in reminder for key in ['text', 'date', 'hour', 'minute']):
+                    # Планируем напоминание СИНХРОННО через run_sync
+                    application.job_queue.run_once(
+                        lambda context: asyncio.create_task(schedule_reminder(user_id, context, reminder, idx)),
+                        when=0
+                    )
+                    print(f"✅ Восстановлено напоминание для пользователя {user_id}: {reminder['text']}")
+                else:
+                    print(f"⚠️ Неполные данные для напоминания пользователя {user_id}: {reminder}")
+            except Exception as e:
+                print(f"❌ Ошибка восстановления напоминания для пользователя {user_id}: {e}")
 
     # Добавляем обработчики
     conv_handler = ConversationHandler(
@@ -667,14 +838,18 @@ def main():
             STATE_TIMEZONE: [CallbackQueryHandler(button)],
         },
         fallbacks=[CommandHandler("start", start)],
-        per_message=False  # Возвращаем обратно
+        per_message=False
     )
 
     application.add_handler(conv_handler)
     
-    print("Бот запущен...")
+    print("🤖 Бот запущен...")
+    print("📊 Статистика:")
+    print(f"   - Пользователей: {len(user_data_store)}")
+    print(f"   - Всего напоминаний: {sum(len(reminders) for reminders in user_data_store.values())}")
+    print(f"   - Часовые пояса: {len(user_timezones)}")
     
-    # Запускаем бота
+    # Запускаем бота СИНХРОННО
     application.run_polling()
 
 if __name__ == "__main__":
